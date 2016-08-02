@@ -1122,4 +1122,91 @@ describe("multiCaching", function() {
             }, /multiCaching requires an array/);
         });
     });
+
+    context("when used in an infinicache setup", function() {
+        describe("wrap()", function() {
+            beforeEach(function() {
+                //infinicache setup: first cache store is using a TTL of 0 (infinite)
+                //while other cache stores will be used as backup/refresh timeout in the background
+                this.memcache1 = caching({store: 'memory', ttl: 0, promiseDependency: Promise});
+                this.memcache2 = caching({store: 'memory', ttl: 0.1, promiseDependency: Promise});
+                multiCache = multiCaching([this.memcache1, this.memcache2]);
+
+                this.key = support.random.string(20);
+                this.value = support.random.string();
+            });
+
+            //basic wrap testing, to check that we don't break things using an infinicache setup
+            it("should get cache from first cache when available", function() {
+                return this.memcache1.set(this.key, this.value)
+                    .then(function() {
+                        return multiCache.wrap(this.key, function() {});
+                    })
+                    .then(function(value) {
+                        assert.equal(value, this.value);
+                    });
+            });
+
+            //we ensure we don't break default behaviour when using an infinicache setup
+            it("should get cache from store 2 when available and store 1 is empty, and refresh store 1", function() {
+                var self = this;
+                return multiCache.wrap(this.key, function() { return self.value; })
+                    .then(function() {
+                        return self.memcache1.del(self.key);
+                    })
+                    .then(function() {
+                        return multiCache.wrap(self.key, function() { });
+                    })
+                    .then(function(value) {
+                        assert.equal(value, self.value);
+                    })
+                    .then(function() {
+                        return self.memcache1.get(self.key);
+                    })
+                    .then(function(value) {
+                        assert.equal(value, self.value);
+                    });
+            });
+
+            it("should get cache from store 1 when available, and update store 2 then 1 if outdated", function() {
+                var self = this;
+                var refreshedValue = support.random.string();
+
+                //wrap will set the cache on all stores the first time
+                return multiCache.wrap(this.key, function() { return self.value; })
+                    .then(function() {
+                        //we delete cache from seconary store, as if TTL expired
+                        return self.memcache2.del(self.key);
+                    })
+                    .then(function() {
+                        //we wait 1 sec to ensure TTL is expired on secondary caches
+                        return new Promise(function(resolve) {
+                            setTimeout(resolve, 1000);
+                        });
+                    })
+                    .then(function() {
+                        //we do a new wrap, returning a different value
+                        return multiCache.wrap(self.key, function() { return refreshedValue; });
+                    })
+                    .then(function(value) {
+                        //it should return the value currently stored in store 1 ASAP
+                        assert.equal(value, self.value);
+                    })
+                    .then(function() {
+                        return self.memcache2.get(self.key);
+                    })
+                    .then(function(value) {
+                        //it should have refreshed store 2 with a new value
+                        assert.equal(value, refreshedValue);
+                    })
+                    .then(function() {
+                        return self.memcache1.get(self.key);
+                    })
+                    .then(function(value) {
+                        //and then store 1 should have been updated
+                        assert.equal(value, refreshedValue);
+                    });
+            });
+        });
+    });
 });
